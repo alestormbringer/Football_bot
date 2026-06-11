@@ -1,3 +1,4 @@
+import time
 import logging
 import requests
 from config.settings import OPENROUTER_BASE_URL, OPENROUTER_KEY, LLM_PRIMARY, LLM_FALLBACK, LLM_MAX_TOKENS
@@ -75,9 +76,29 @@ Lunghezza massima: 200 parole. Scrivi in italiano."""
     return prompt
 
 
-def generate_report(prompt: str, model: str = LLM_PRIMARY) -> str | None:
+def _retry_after_seconds(resp: requests.Response, default: float = 5.0) -> float:
+    """Estrae il tempo di attesa da un 429: header Retry-After, oppure
+    error.metadata.retry_after_seconds nel body (formato OpenRouter)."""
+    header_value = resp.headers.get("Retry-After")
+    if header_value:
+        try:
+            return float(header_value)
+        except ValueError:
+            pass
+    try:
+        metadata = resp.json().get("error", {}).get("metadata", {})
+        if "retry_after_seconds" in metadata:
+            return float(metadata["retry_after_seconds"])
+    except Exception:
+        pass
+    return default
+
+
+def generate_report(prompt: str, model: str = LLM_PRIMARY, retries: int = 2) -> str | None:
     """
     Chiama OpenRouter con il modello specificato.
+    Su 429 (rate limit upstream sui modelli :free) attende il tempo
+    indicato da Retry-After e ritenta fino a `retries` volte.
     Restituisce il testo generato o None in caso di errore.
     """
     headers = {
@@ -94,19 +115,35 @@ def generate_report(prompt: str, model: str = LLM_PRIMARY) -> str | None:
         "max_tokens": LLM_MAX_TOKENS,
         "temperature": 0.7,
     }
-    try:
-        resp = requests.post(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        logger.error("Errore OpenRouter [%s]: %s", model, e)
-        return None
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(
+                f"{OPENROUTER_BASE_URL}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+            if resp.status_code == 429:
+                wait = _retry_after_seconds(resp)
+                if attempt < retries:
+                    logger.warning(
+                        "[%s] Rate limit upstream (429), attendo %.1fs (tentativo %d/%d)",
+                        model, wait, attempt + 1, retries,
+                    )
+                    time.sleep(wait)
+                    continue
+                logger.error("[%s] Rate limit upstream (429), tentativi esauriti", model)
+                return None
+
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.error("Errore OpenRouter [%s]: %s", model, e)
+            if attempt == retries:
+                return None
+            time.sleep(2)
+    return None
 
 
 def generate_report_with_fallback(prompt: str) -> tuple[str | None, str]:
