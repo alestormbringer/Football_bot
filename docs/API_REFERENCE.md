@@ -1,282 +1,153 @@
-# API-Football v3 — Reference Sheet (endpoint usati nel progetto)
+# football-data.org v4 — Reference Sheet (endpoint usati nel progetto)
 
-> Estratto dalla documentazione ufficiale v3.9.3. Solo gli endpoint effettivamente usati.
-> Base URL: `https://v3.football.api-sports.io`
-> Auth header: `x-apisports-key: YOUR_KEY`
-
----
-
-## /status (NON conta sulla quota)
-
-```
-GET /status
-```
-Restituisce le call rimanenti oggi. Chiamare all'inizio di ogni job.
-
-**Response:**
-```json
-{
-  "response": {
-    "subscription": { "plan": "Free", "active": true },
-    "requests": { "current": 12, "limit_day": 100 }
-  }
-}
-```
+> Base URL: `https://api.football-data.org/v4`
+> Auth header: `X-Auth-Token: YOUR_KEY`
+> Piano Free: **10 richieste/minuto** (nessun tetto giornaliero), gestito lato
+> client da `FootballDataClient` (`modules/api_client.py`) con una sliding
+> window locale.
 
 ---
 
-## /fixtures
+## Competizioni disponibili nel piano Free
 
-```
-GET /fixtures
-```
+| Codice | Nome              | ID   | Chiave config          |
+|--------|-------------------|------|-------------------------|
+| PL     | Premier League    | 2021 | `premier_league`        |
+| PD     | La Liga           | 2014 | `la_liga`                |
+| SA     | Serie A           | 2019 | `serie_a`                |
+| BL1    | Bundesliga        | 2002 | `bundesliga`             |
+| FL1    | Ligue 1           | 2015 | `ligue_1`                |
+| CL     | Champions League  | 2001 | `champions`              |
+| WC     | FIFA World Cup    | 2000 | `world_cup`              |
+| EC     | UEFA Euro         | 2018 | `euro`                   |
 
-**Parametri usati nel progetto:**
+**Non incluse nel piano Free:** Europa League, Conference League, FA Cup,
+Coppa Italia, Copa del Rey, Nations League. **Non disponibili su nessun
+piano:** infortuni e formazioni (lineups) — la sezione "infortuni" del
+report viene quindi sempre generata come "nessun infortunio noto".
 
-| Parametro | Tipo    | Uso                                                    |
-|-----------|---------|--------------------------------------------------------|
-| `league`  | integer | ID della competizione                                  |
-| `season`  | integer | Anno stagione (es. 2025)                               |
-| `from`    | string  | Data inizio YYYY-MM-DD                                 |
-| `to`      | string  | Data fine YYYY-MM-DD                                   |
-| `ids`     | string  | Max 20 fixture ID separati da `-` (batch fetch)        |
-| `timezone`| string  | Es. `Europe/Rome`                                      |
+---
 
-**Update frequency:** ogni 15 secondi
-**Recommended calls:** 1/giorno (nessuna partita in corso)
+## GET /competitions/{code}/matches
+
+Partite di una competizione in un intervallo di date.
+
+**Parametri usati:**
+
+| Parametro  | Tipo   | Uso                          |
+|------------|--------|-------------------------------|
+| `dateFrom` | string | Data inizio `YYYY-MM-DD`      |
+| `dateTo`   | string | Data fine `YYYY-MM-DD`        |
 
 **Uso nel progetto:**
-- Venerdì: `?league=39&season=2025&from=2025-08-22&to=2025-08-25` → 1 call per competizione
-- Sab/dom refresh: `?ids=ID1-ID2-ID3-...` → 1 call per 20 partite
+- Venerdì (`friday_full_fetch`): `dateFrom`=venerdì, `dateTo`=lunedì → 1 call
+  per competizione (tutte le 8 competizioni).
+- Lun-gio (`international_daily_fetch`): `dateFrom`=`dateTo`=oggi → 1 call per
+  torneo internazionale attivo (`world_cup`, `euro`).
 
 **Struttura response (campi rilevanti):**
 ```json
 {
-  "fixture": {
-    "id": 215662,
-    "date": "2020-02-06T14:00:00+00:00",
-    "status": { "short": "NS", "elapsed": null }
-  },
-  "league": {
-    "id": 39,
-    "name": "Premier League",
-    "season": 2019,
-    "round": "Regular Season - 14"
-  },
-  "teams": {
-    "home": { "id": 967, "name": "Arsenal", "winner": null },
-    "away": { "id": 968, "name": "Chelsea", "winner": null }
-  },
-  "goals": { "home": null, "away": null }
-}
-```
-
-**Status codes rilevanti:**
-- `NS` = Not Started (partita futura — quello che ci interessa)
-- `FT` = Full Time
-- `PST` = Postponed
-- `CANC` = Cancelled
-- `TBD` = Data da definire
-
----
-
-## /standings
-
-```
-GET /standings?league={id}&season={year}
-```
-
-**Parametri:**
-
-| Parametro | Tipo    | Note              |
-|-----------|---------|-------------------|
-| `league`  | integer | ID lega           |
-| `season`  | integer | Anno (richiesto)  |
-
-**Update frequency:** ogni ora
-**Recommended calls:** 1/giorno
-
-**Struttura response (campi rilevanti):**
-```json
-{
-  "response": [{
-    "league": {
-      "standings": [[
-        {
-          "rank": 1,
-          "team": { "id": 40, "name": "Liverpool" },
-          "points": 70,
-          "goalsDiff": 41,
-          "form": "WWWWW",
-          "all": { "played": 24, "win": 23, "draw": 1, "lose": 0 },
-          "goals": { "for": 56, "against": 15 }
-        }
-      ]]
+  "matches": [
+    {
+      "id": 497569,
+      "utcDate": "2026-06-11T19:00:00Z",
+      "status": "SCHEDULED",
+      "matchday": 1,
+      "stage": "GROUP_STAGE",
+      "group": "Group A",
+      "homeTeam": { "id": 773, "name": "Mexico" },
+      "awayTeam": { "id": 3922, "name": "Canada" },
+      "score": { "fullTime": { "home": null, "away": null } }
     }
-  }]
+  ]
 }
 ```
 
-**Nota:** `standings[0]` è il gruppo principale. Per coppe con gironi ci sono più array.
+**Status rilevanti:** `SCHEDULED`, `TIMED` → mappati a `NS` nel DB;
+`FINISHED` → mappato a `FT`. Partite con `homeTeam`/`awayTeam` ancora `null`
+(fasi finali da sorteggiare) vengono scartate da `_build_fixture_row`.
 
 ---
 
-## /fixtures/headtohead
+## GET /competitions/{code}/standings
 
+Classifica della stagione corrente (1 call per competizione).
+
+**Struttura response (campi rilevanti):**
+```json
+{
+  "standings": [
+    {
+      "type": "TOTAL",
+      "group": "Group A",
+      "table": [
+        {
+          "position": 1,
+          "team": { "id": 773, "name": "Mexico" },
+          "playedGames": 3,
+          "form": "W,W,D",
+          "goalsFor": 5,
+          "goalsAgainst": 1
+        }
+      ]
+    },
+    { "type": "HOME", "table": [ ... ] },
+    { "type": "AWAY", "table": [ ... ] }
+  ]
+}
 ```
-GET /fixtures/headtohead?h2h={team1_id}-{team2_id}&last=5
-```
+
+**Note importanti:**
+- I campionati con girone unico restituiscono di norma 3 tabelle: `TOTAL`,
+  `HOME`, `AWAY`.
+- I tornei a gironi (Mondiale, Europei in fase a gruppi) restituiscono **solo**
+  `TOTAL`, una tabella per gruppo (`group: "Group A"`, `"Group B"`, ...).
+- `_build_standings_cache` usa `HOME`/`AWAY` quando disponibili, altrimenti
+  usa i valori `TOTAL` come fallback per entrambi (caso Mondiale/Europei).
+- `form` è una stringa CSV tipo `"W,W,D,L,W"` → ripulita rimuovendo le virgole.
+
+---
+
+## GET /matches/{id}/head2head
+
+Ultimi N scontri diretti per una partita specifica.
 
 **Parametri:**
 
-| Parametro | Tipo    | Note                          |
-|-----------|---------|-------------------------------|
-| `h2h`     | string  | `ID1-ID2` (richiesto)         |
-| `last`    | integer | Ultimi N scontri (usare 5)    |
+| Parametro | Tipo    | Note                       |
+|-----------|---------|----------------------------|
+| `limit`   | integer | Numero di precedenti (5)   |
 
-**Update frequency:** ogni 15 secondi
-**Recommended calls:** 1/giorno
-
-**Struttura response:** stessa struttura di `/fixtures`
+**Struttura response:** stessa struttura di `/competitions/{code}/matches`
+(lista `matches`), usata da `_summarize_h2h` per produrre una stringa tipo:
+`"Italia 2-1 Brasile | Brasile 0-0 Italia | ..."`.
 
 ---
 
-## /injuries
+## Gestione errori e rate limit
 
-```
-GET /injuries
-```
+`FootballDataClient._get`:
+- `200` → JSON body
+- `429` → attende `Retry-After` secondi e ritenta
+- `5xx` → retry con backoff esponenziale (max 2 tentativi)
+- `404` → `None` (nessun dato)
+- altri codici → log errore, `None`
 
-**Parametri (usare uno dei seguenti):**
-
-| Parametro | Tipo    | Note                                          |
-|-----------|---------|-----------------------------------------------|
-| `league`  | integer | + `season` richiesto → tutti gli infortuni    |
-| `ids`     | string  | Max 20 fixture IDs separati da `-`            |
-| `fixture` | integer | Singola partita                               |
-
-**Update frequency:** ogni 4 ore
-**Recommended calls:** 1/giorno
-
-**Tipi di infortuni:**
-- `"Missing Fixture"` → il giocatore NON giocherà (certo)
-- `"Questionable"` → incerto, potrebbe giocare
-
-**Struttura response:**
-```json
-{
-  "response": [{
-    "player": {
-      "id": 865,
-      "name": "D. Costa",
-      "type": "Missing Fixture",
-      "reason": "Broken ankle"
-    },
-    "team": { "id": 157, "name": "Bayern Munich" },
-    "fixture": { "id": 686314 }
-  }]
-}
-```
+Ogni chiamata viene loggata su Supabase (`api_usage_log`) a scopo di
+monitoraggio, ma **non** determina un blocco per quota giornaliera (a
+differenza della vecchia integrazione API-Football): il limite è solo le
+10 richieste/minuto, applicate lato client prima di ogni request.
 
 ---
 
-## /fixtures/lineups
+## Stima chiamate per settimana
 
-```
-GET /fixtures/lineups?fixture={id}
-```
+| Job                          | Chiamate stimate                                  |
+|-------------------------------|----------------------------------------------------|
+| `friday_full_fetch`            | 8 (matches) + N (standings, solo leghe con partite) + M (H2H, 1/partita) |
+| `daily_refresh` (sab/dom)       | 1 standings per lega con partite quel giorno      |
+| `international_daily_fetch` (lun-gio) | 1 matches + 1 standings per torneo attivo, + H2H per partita del giorno |
 
-**Update frequency:** ogni 15 minuti
-**Recommended calls:** 1/giorno (disponibili ~60 min prima del match)
-
-**Uso nel progetto:** refresh sab/dom per partite imminenti (< 2 ore al fischio)
-
----
-
-## /fixtures/statistics (NON usato nel fetch principale)
-
-```
-GET /fixtures/statistics?fixture={id}
-```
-Statistiche post-partita. Non disponibili per partite non ancora giocate.
-Utile solo per aggiornare i dati storici del modello ML (futuro).
-
----
-
-## /leagues (chiamata di bootstrap, 1 volta)
-
-```
-GET /leagues?current=true
-```
-Restituisce tutte le leghe attive con il loro `coverage` object.
-
-**Coverage object da verificare prima di chiamare endpoint downstream:**
-```json
-"coverage": {
-  "fixtures": { "events": true, "lineups": true, "statistics_fixtures": false },
-  "standings": true,
-  "injuries": true,
-  "predictions": true
-}
-```
-Se `injuries: false` per una competizione → non chiamare `/injuries` per quella lega.
-
----
-
-## Response wrapper universale
-
-Ogni endpoint restituisce sempre questa struttura:
-```json
-{
-  "get": "fixtures",
-  "parameters": { "league": "39" },
-  "errors": [],
-  "results": 10,
-  "paging": { "current": 1, "total": 1 },
-  "response": [ ... ]
-}
-```
-
-**Logica di parsing:**
-```python
-def safe_parse(raw_response: dict) -> list:
-    if raw_response.get("errors"):
-        return []
-    if raw_response.get("paging", {}).get("total", 1) > 1:
-        # Attenzione: ci sono più pagine
-        pass
-    return raw_response.get("response", [])
-```
-
----
-
-## Budget call — riepilogo pratico
-
-| Giorno   | Operazione                            | Call stimate |
-|----------|---------------------------------------|--------------|
-| Venerdì  | fixtures × 14 comp. (11 club + 3 int.)| 14           |
-| Venerdì  | standings × 14 comp.                  | 14           |
-| Venerdì  | H2H × ~48 partite                     | 48           |
-| Venerdì  | injuries × 14 comp.                   | 14           |
-| Venerdì  | **Totale worst case**                 | **~90**      |
-| Sabato   | injuries batch + lineups              | ~10          |
-| Domenica | injuries batch + lineups              | ~10          |
-| **TOT**  | **Settimana completa**                | **~110**     |
-
-### Perché il budget non esplode con i tornei internazionali
-
-Mondiali, Euro e Nations League **non si sovrappongono mai** alle giornate di campionato:
-
-- **Mondiali / Euro** (giugno-luglio): i campionati nazionali sono finiti da settimane. Le call per Premier League, Serie A ecc. restituiscono lista vuota → 0 call effettive.
-- **Nations League** (soste internazionali settembre/ottobre/novembre): i campionati si fermano esattamente in quelle settimane. Stessa cosa.
-
-In pratica il venerdì di una settimana con Mondiali assomiglia a:
-- Fixtures × 1 (solo world_cup) → 1 call
-- Standings → 1 call
-- H2H × ~8 partite → 8 call
-- Injuries → 1 call
-
-Totale: **~11 call**, molto sotto il limite. Il budget non si somma mai.
-
-**Nota:** Le coppe europee (Champions, Europa, Conference) non giocano nelle settimane di Nations League, quindi anche quelle si azzerano automaticamente.
-
+Con il rate limit di 10 req/min, eventuali picchi (es. molte H2H di fila)
+vengono semplicemente rallentati dal client, senza errori né perdita di dati.

@@ -1,6 +1,17 @@
 # Football AI Bot — Build Specification
 > Documento di riferimento per Claude Code. Contiene tutto il necessario per costruire il progetto da zero senza ambiguità.
 
+> **NOTA (migrazione dati):** questo documento descrive la versione iniziale
+> del progetto basata su API-Football v3. La fonte dati è stata sostituita
+> con **football-data.org v4** (vedi [`docs/API_REFERENCE.md`](API_REFERENCE.md))
+> perché il piano Free di API-Football non copre le stagioni 2025/26 e il
+> Mondiale 2026. I riferimenti ad API-Football, `CURRENT_SEASON`, al budget
+> di 100 call/giorno e alle competizioni non disponibili su football-data.org
+> (Europa League, Conference League, coppe nazionali, Nations League, infortuni)
+> sono superati: fare riferimento a `config/settings.py`,
+> `modules/api_client.py` e `scheduler/cron_runner.py` per l'implementazione
+> attuale.
+
 ---
 
 ## 1. Panoramica del progetto

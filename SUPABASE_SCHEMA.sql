@@ -16,32 +16,20 @@ CREATE TABLE IF NOT EXISTS competitions (
     updated_at    TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Seed dati competizioni
+-- Seed dati competizioni (football-data.org v4, piano Free)
 INSERT INTO competitions (id, key, name, country, type, season, international) VALUES
 -- Campionati nazionali
-(39,  'premier_league', 'Premier League',     'England', 'league', 2025, false),
-(140, 'la_liga',        'La Liga',             'Spain',   'league', 2025, false),
-(135, 'serie_a',        'Serie A',             'Italy',   'league', 2025, false),
-(78,  'bundesliga',     'Bundesliga',          'Germany', 'league', 2025, false),
-(61,  'ligue_1',        'Ligue 1',             'France',  'league', 2025, false),
+(2021, 'premier_league', 'Premier League',     'England', 'league', 2025, false),
+(2014, 'la_liga',        'La Liga',             'Spain',   'league', 2025, false),
+(2019, 'serie_a',        'Serie A',             'Italy',   'league', 2025, false),
+(2002, 'bundesliga',     'Bundesliga',          'Germany', 'league', 2025, false),
+(2015, 'ligue_1',        'Ligue 1',             'France',  'league', 2025, false),
 -- Coppe europee per club
-(2,   'champions',      'Champions League',    'World',   'cup',    2025, false),
-(3,   'europa',         'Europa League',       'World',   'cup',    2025, false),
-(848, 'conference',     'Conference League',   'World',   'cup',    2025, false),
--- Coppe nazionali
-(45,  'fa_cup',         'FA Cup',              'England', 'cup',    2025, false),
-(137, 'coppa_italia',   'Coppa Italia',        'Italy',   'cup',    2025, false),
-(143, 'copa_del_rey',   'Copa del Rey',        'Spain',   'cup',    2025, false),
+(2001, 'champions',      'Champions League',    'World',   'cup',    2025, false),
 -- Tornei internazionali per nazionali
 -- NOTA: season per questi viene aggiornata automaticamente dal codice (anno solare).
--- I valori qui sotto sono placeholder; il cron_runner usa date.today().year.
--- I Mondiali/Euro/Nations League non si sovrappongono mai ai campionati.
-(1,   'world_cup',      'FIFA World Cup',      'World',   'cup',    2026, true),
-(4,   'euro',           'UEFA Euro',           'Europe',  'cup',    2028, true),
--- ID 4 = UEFA Euro su API-Football: verificare nel dashboard prima del deploy
--- https://dashboard.api-football.com/soccer/ids/leagues
-(5,   'nations_league', 'UEFA Nations League', 'Europe',  'cup',    2026, true)
--- ID 5 = Nations League su API-Football: verificare nel dashboard prima del deploy
+(2000, 'world_cup',      'FIFA World Cup',      'World',   'cup',    2026, true),
+(2018, 'euro',           'UEFA Euro',           'Europe',  'cup',    2028, true)
 ON CONFLICT (id) DO NOTHING;
 
 -- 2. fixtures

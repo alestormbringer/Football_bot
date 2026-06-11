@@ -40,12 +40,12 @@ nano .env  # Inserisci le credenziali reali
 # Attiva venv
 source venv/bin/activate
 
-# Test connessione API-Football
+# Test connessione football-data.org
 python3 -c "
-from modules.api_client import APIFootballClient
-api = APIFootballClient()
-rem = api.get_remaining_calls()
-print(f'Call rimanenti oggi: {rem}')
+from modules.api_client import FootballDataClient
+api = FootballDataClient()
+data = api.get_matches('WC', '2026-06-11', '2026-06-11')
+print(f'Partite Mondiale oggi: {len(data)}')
 "
 
 # Test connessione Supabase
@@ -56,7 +56,13 @@ result = db.table('competitions').select('name').execute()
 print([r['name'] for r in result.data])
 "
 
-# Test fetch manuale (senza aspettare venerdì)
+# Test fetch giornaliero tornei internazionali (Mondiale/Europei)
+python3 -c "
+from scheduler.cron_runner import international_daily_fetch
+international_daily_fetch()
+"
+
+# Test fetch manuale weekend (senza aspettare venerdì)
 python3 -c "
 from scheduler.cron_runner import friday_full_fetch
 friday_full_fetch()
@@ -83,11 +89,7 @@ kill $(cat logs/bot.pid)
 # Log in tempo reale
 tail -f ~/football-ai-bot/logs/bot.log
 
-# Controlla call API usate oggi (da terminale)
-curl -s https://v3.football.api-sports.io/status \
-  -H "x-apisports-key: $API_FOOTBALL_KEY" | python3 -m json.tool
-
-# Controlla uso call da Supabase (SQL editor)
+# Controlla chiamate API loggate da Supabase (SQL editor)
 SELECT * FROM api_calls_today;
 
 # Controlla report della settimana
@@ -97,24 +99,31 @@ FROM weekly_reports
 ORDER BY match_date;
 ```
 
+Il piano Free di football-data.org non ha un tetto giornaliero, solo il
+limite di 10 richieste/minuto gestito automaticamente dal client — non serve
+nessun controllo di "budget residuo" come con la vecchia integrazione
+API-Football.
+
 ## Aggiornare la stagione (ogni anno ad agosto)
 
-1. Aggiornare `CURRENT_SEASON` nel `.env`
-2. Aggiornare il campo `season` nella tabella `competitions` su Supabase:
-   ```sql
-   UPDATE competitions SET season = 2026 WHERE season = 2025;
-   ```
-3. Riavviare il bot
+Aggiornare il campo `season` nella tabella `competitions` su Supabase (a
+scopo informativo — football-data.org restituisce sempre la stagione
+corrente senza bisogno di specificarla):
+```sql
+UPDATE competitions SET season = 2026 WHERE season = 2025;
+```
 
 ## Struttura log attesa (avvio corretto)
 
 ```
-2025-08-22 06:00:01 [INFO] __main__: Avvio Football AI Bot...
-2025-08-22 06:00:01 [INFO] __main__: Scheduler avviato. Jobs: ['friday_fetch', 'saturday_refresh', 'sunday_refresh']
-2025-08-22 06:00:01 [INFO] __main__: Bot Telegram in polling...
-# ... silenzio fino a venerdì 06:00 UTC ...
-2025-08-22 06:00:00 [INFO] cron_runner: === FRIDAY FETCH START ===
-2025-08-22 06:00:00 [INFO] cron_runner: Call rimanenti prima del fetch: 100
-2025-08-22 06:00:05 [INFO] cron_runner: Lega premier_league: 10 partite scaricate
+2026-06-08 06:00:01 [INFO] __main__: Avvio Football AI Bot...
+2026-06-08 06:00:01 [INFO] __main__: Scheduler avviato. Jobs: ['friday_fetch', 'saturday_refresh', 'sunday_refresh', 'international_daily_fetch']
+2026-06-08 06:00:01 [INFO] __main__: Bot Telegram in polling...
+# ... silenzio fino al prossimo job pianificato ...
+2026-06-08 06:00:00 [INFO] cron_runner: === FRIDAY FETCH START ===
+2026-06-08 06:00:05 [INFO] cron_runner: Lega premier_league: 10 partite scaricate
+...
+2026-06-11 06:00:00 [INFO] cron_runner: === INTERNATIONAL DAILY FETCH START ===
+2026-06-11 06:00:02 [INFO] cron_runner: Torneo world_cup: 2 partite oggi
 ...
 ```
