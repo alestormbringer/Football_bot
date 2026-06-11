@@ -270,9 +270,12 @@ def friday_full_fetch():
 # ==============================================================
 def daily_refresh(day_name: str = "saturday"):
     """
-    Refresh leggero: solo infortuni aggiornati per le partite in
-    programma oggi. Rigenera il report (con probabilità ML ricalcolate
-    dalle statistiche già salvate venerdì) se ci sono novità.
+    Refresh giornaliero: per ogni lega che ha partite in programma oggi,
+    riscarica gli infortuni aggiornati (1 call per lega, come il venerdì —
+    "a giornata" e non solo una volta nel weekend). Se la situazione
+    infortuni è cambiata rispetto all'ultimo fetch, ricalcola le
+    probabilità ML (dalle statistiche già salvate venerdì) e rigenera
+    il report.
     """
     logger.info("=== %s REFRESH START ===", day_name.upper())
     today = date.today().isoformat()
@@ -290,51 +293,45 @@ def daily_refresh(day_name: str = "saturday"):
         logger.info("Nessuna partita oggi, refresh saltato.")
         return
 
-    fixture_ids = [f["id"] for f in today_fixtures]
-    logger.info("Partite oggi: %d", len(fixture_ids))
+    logger.info("Partite oggi: %d", len(today_fixtures))
 
-    # Fetch injuries in batch (max 20 per call)
-    injuries_raw = api.get_injuries(
-        league_id=0, season=0,  # non usati se fixture_ids è fornito
-        fixture_ids=fixture_ids[:20],
-    )
+    # Infortuni aggiornati per ogni lega che gioca oggi (1 call per lega)
+    leagues_today = {f["competition_id"] for f in today_fixtures}
+    injuries_cache: dict[int, dict] = {}
+    for league_id in leagues_today:
+        league_key = LEAGUE_ID_MAP.get(league_id)
+        season = get_season_for_competition(league_key) if league_key else CURRENT_SEASON
+        injuries_cache[league_id] = _build_injuries_cache(league_id, season)
 
-    # Raggruppa infortuni per fixture
-    injuries_by_fixture: dict[int, list] = {}
-    for inj in injuries_raw:
-        fid = inj.get("fixture", {}).get("id")
-        if fid:
-            injuries_by_fixture.setdefault(fid, []).append(inj)
-
-    # Rigenera report solo se ci sono infortuni nuovi
+    # Rigenera report solo se la situazione infortuni è cambiata
     for f in today_fixtures:
         fid = f["id"]
-        new_injuries = injuries_by_fixture.get(fid, [])
-        if not new_injuries:
-            continue
+        comp_id = f["competition_id"]
 
-        # Recupera stats salvate venerdì
+        injuries_home = injuries_cache.get(comp_id, {}).get(f["home_team_id"], [])
+        injuries_away = injuries_cache.get(comp_id, {}).get(f["away_team_id"], [])
+
+        # Recupera stats salvate (venerdì o refresh precedente)
         stats_res = db.table("fixture_stats").select("*").eq("fixture_id", fid).execute()
         stats = stats_res.data[0] if stats_res.data else {}
 
+        if injuries_home == (stats.get("injuries_home") or []) and \
+                injuries_away == (stats.get("injuries_away") or []):
+            continue  # nessuna novità rispetto all'ultimo fetch
+
         ml_input = build_match_stats(stats)
         probs = compute_poisson_probs(**ml_input)
-
-        injuries_home = [
-            {"name": i["player"]["name"], "reason": i["player"].get("reason", "?")}
-            for i in new_injuries
-            if i["team"]["id"] == f["home_team_id"] and i["player"].get("type") == "Missing Fixture"
-        ]
-        injuries_away = [
-            {"name": i["player"]["name"], "reason": i["player"].get("reason", "?")}
-            for i in new_injuries
-            if i["team"]["id"] == f["away_team_id"] and i["player"].get("type") == "Missing Fixture"
-        ]
         probs = adjust_for_injuries(probs, len(injuries_home), len(injuries_away))
+
+        db.table("fixture_stats").upsert({
+            "fixture_id":    fid,
+            "injuries_home": injuries_home,
+            "injuries_away": injuries_away,
+        }).execute()
 
         prompt = build_match_prompt(
             home_team=f["home_team_name"], away_team=f["away_team_name"],
-            competition=_get_league_name(f["competition_id"]),
+            competition=_get_league_name(comp_id),
             match_date=today,
             home_form=stats.get("home_form") or "N/A",
             away_form=stats.get("away_form") or "N/A",
@@ -351,7 +348,7 @@ def daily_refresh(day_name: str = "saturday"):
                 "llm_model_used": model_used,
                 "is_updated":     True,
             }).execute()
-            logger.info("Report aggiornato fixture %d", fid)
+            logger.info("Report aggiornato fixture %d (infortuni cambiati)", fid)
 
     logger.info("=== %s REFRESH END ===", day_name.upper())
 
