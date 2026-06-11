@@ -95,6 +95,23 @@ def _build_standings_cache(league_id: int, season: int) -> dict:
     return cache
 
 
+def _build_fixture_row(f: dict, league_id: int, week_start: date) -> dict:
+    """Normalizza una fixture API-Football nel formato della tabella `fixtures`."""
+    return {
+        "id":             f["fixture"]["id"],
+        "competition_id": league_id,
+        "home_team_id":   f["teams"]["home"]["id"],
+        "home_team_name": f["teams"]["home"]["name"],
+        "away_team_id":   f["teams"]["away"]["id"],
+        "away_team_name": f["teams"]["away"]["name"],
+        "match_date":     f["fixture"]["date"],
+        "round":          f["league"].get("round"),
+        "status":         f["fixture"]["status"]["short"],
+        "week_start":     week_start.isoformat(),
+        "raw_data":       f,
+    }
+
+
 def _build_injuries_cache(league_id: int, season: int) -> dict:
     """
     Scarica gli infortuni "Missing Fixture" per l'intera lega (1 call)
@@ -114,6 +131,91 @@ def _build_injuries_cache(league_id: int, season: int) -> dict:
         except KeyError:
             continue
     return cache
+
+
+# ==============================================================
+# Helpers — elaborazione singola partita
+# ==============================================================
+def _process_fixture(f: dict, standings_cache: dict, injuries_cache: dict) -> None:
+    """
+    H2H + ML + report LLM per una singola partita.
+    Usato sia dal fetch del venerdì sia dal fetch giornaliero
+    dei tornei internazionali.
+    """
+    home_id    = f["home_team_id"]
+    away_id    = f["away_team_id"]
+    comp_id    = f["competition_id"]
+    fixture_id = f["id"]
+
+    # H2H
+    h2h = api.get_h2h(home_id, away_id, last=5)
+
+    team_stats = standings_cache.get(comp_id, {})
+    home_stats = team_stats.get(home_id, {})
+    away_stats = team_stats.get(away_id, {})
+
+    injuries_home = injuries_cache.get(comp_id, {}).get(home_id, [])
+    injuries_away = injuries_cache.get(comp_id, {}).get(away_id, [])
+
+    # --- ML ---
+    ml_input = {
+        "home_attack":  home_stats.get("home_goals_avg", 1.2),
+        "home_defense": home_stats.get("home_conceded_avg", 1.0),
+        "away_attack":  away_stats.get("away_goals_avg", 1.0),
+        "away_defense": away_stats.get("away_conceded_avg", 1.2),
+    }
+    probs = compute_poisson_probs(**ml_input)
+    probs = adjust_for_injuries(probs, len(injuries_home), len(injuries_away))
+
+    h2h_summary = _summarize_h2h(h2h)
+
+    # Salva fixture_stats
+    db.table("fixture_stats").upsert({
+        "fixture_id":             fixture_id,
+        "home_form":              home_stats.get("form", ""),
+        "away_form":              away_stats.get("form", ""),
+        "home_position":          home_stats.get("rank"),
+        "away_position":          away_stats.get("rank"),
+        "home_goals_avg":         ml_input["home_attack"],
+        "away_goals_avg":         ml_input["away_attack"],
+        "home_conceded_avg":      ml_input["home_defense"],
+        "away_conceded_avg":      ml_input["away_defense"],
+        "h2h_data":               h2h,
+        "injuries_home":          injuries_home,
+        "injuries_away":          injuries_away,
+        "ml_home_prob":           probs["home_win"],
+        "ml_draw_prob":           probs["draw"],
+        "ml_away_prob":           probs["away_win"],
+        "ml_expected_goals_home": probs["expected_home"],
+        "ml_expected_goals_away": probs["expected_away"],
+    }).execute()
+
+    # --- LLM report ---
+    prompt = build_match_prompt(
+        home_team=f["home_team_name"],
+        away_team=f["away_team_name"],
+        competition=_get_league_name(comp_id),
+        match_date=f["match_date"][:10],
+        home_form=home_stats.get("form") or "N/A",
+        away_form=away_stats.get("form") or "N/A",
+        home_position=home_stats.get("rank") or 0,
+        away_position=away_stats.get("rank") or 0,
+        ml_probs=probs,
+        h2h_summary=h2h_summary,
+        injuries_home=injuries_home,
+        injuries_away=injuries_away,
+    )
+    text, model_used = generate_report_with_fallback(prompt)
+    if text:
+        db.table("reports").upsert({
+            "fixture_id":     fixture_id,
+            "report_text":    text,
+            "llm_model_used": model_used,
+            "is_updated":     False,
+        }).execute()
+        logger.info("Report generato per fixture %d [%s]", fixture_id, model_used)
+    else:
+        logger.error("Report fallito per fixture %d", fixture_id)
 
 
 # ==============================================================
@@ -154,19 +256,7 @@ def friday_full_fetch():
 
         league_rows = []
         for f in fixtures:
-            fixture_row = {
-                "id":             f["fixture"]["id"],
-                "competition_id": league["id"],
-                "home_team_id":   f["teams"]["home"]["id"],
-                "home_team_name": f["teams"]["home"]["name"],
-                "away_team_id":   f["teams"]["away"]["id"],
-                "away_team_name": f["teams"]["away"]["name"],
-                "match_date":     f["fixture"]["date"],
-                "round":          f["league"].get("round"),
-                "status":         f["fixture"]["status"]["short"],
-                "week_start":     week_start.isoformat(),
-                "raw_data":       f,
-            }
+            fixture_row = _build_fixture_row(f, league["id"], week_start)
             db.table("fixtures").upsert(fixture_row).execute()
             league_rows.append(fixture_row)
 
@@ -187,82 +277,64 @@ def friday_full_fetch():
 
     # --- Step 3, 4, 5: H2H + ML + report per partita ---
     for f in all_fixtures:
-        home_id    = f["home_team_id"]
-        away_id    = f["away_team_id"]
-        comp_id    = f["competition_id"]
-        fixture_id = f["id"]
-
-        # H2H
-        h2h = api.get_h2h(home_id, away_id, last=5)
-
-        team_stats = standings_cache.get(comp_id, {})
-        home_stats = team_stats.get(home_id, {})
-        away_stats = team_stats.get(away_id, {})
-
-        injuries_home = injuries_cache.get(comp_id, {}).get(home_id, [])
-        injuries_away = injuries_cache.get(comp_id, {}).get(away_id, [])
-
-        # --- ML ---
-        ml_input = {
-            "home_attack":  home_stats.get("home_goals_avg", 1.2),
-            "home_defense": home_stats.get("home_conceded_avg", 1.0),
-            "away_attack":  away_stats.get("away_goals_avg", 1.0),
-            "away_defense": away_stats.get("away_conceded_avg", 1.2),
-        }
-        probs = compute_poisson_probs(**ml_input)
-        probs = adjust_for_injuries(probs, len(injuries_home), len(injuries_away))
-
-        h2h_summary = _summarize_h2h(h2h)
-
-        # Salva fixture_stats
-        db.table("fixture_stats").upsert({
-            "fixture_id":             fixture_id,
-            "home_form":              home_stats.get("form", ""),
-            "away_form":              away_stats.get("form", ""),
-            "home_position":          home_stats.get("rank"),
-            "away_position":          away_stats.get("rank"),
-            "home_goals_avg":         ml_input["home_attack"],
-            "away_goals_avg":         ml_input["away_attack"],
-            "home_conceded_avg":      ml_input["home_defense"],
-            "away_conceded_avg":      ml_input["away_defense"],
-            "h2h_data":               h2h,
-            "injuries_home":          injuries_home,
-            "injuries_away":          injuries_away,
-            "ml_home_prob":           probs["home_win"],
-            "ml_draw_prob":           probs["draw"],
-            "ml_away_prob":           probs["away_win"],
-            "ml_expected_goals_home": probs["expected_home"],
-            "ml_expected_goals_away": probs["expected_away"],
-        }).execute()
-
-        # --- LLM report ---
-        prompt = build_match_prompt(
-            home_team=f["home_team_name"],
-            away_team=f["away_team_name"],
-            competition=_get_league_name(comp_id),
-            match_date=f["match_date"][:10],
-            home_form=home_stats.get("form") or "N/A",
-            away_form=away_stats.get("form") or "N/A",
-            home_position=home_stats.get("rank") or 0,
-            away_position=away_stats.get("rank") or 0,
-            ml_probs=probs,
-            h2h_summary=h2h_summary,
-            injuries_home=injuries_home,
-            injuries_away=injuries_away,
-        )
-        text, model_used = generate_report_with_fallback(prompt)
-        if text:
-            db.table("reports").upsert({
-                "fixture_id":     fixture_id,
-                "report_text":    text,
-                "llm_model_used": model_used,
-                "is_updated":     False,
-            }).execute()
-            logger.info("Report generato per fixture %d [%s]", fixture_id, model_used)
-        else:
-            logger.error("Report fallito per fixture %d", fixture_id)
+        _process_fixture(f, standings_cache, injuries_cache)
 
     logger.info("=== FRIDAY FETCH END — %d partite elaborate ===", len(all_fixtures))
+
+
+# ==============================================================
+# JOB 3 — TORNEI INTERNAZIONALI: fetch giornaliero (lun-gio)
+# ==============================================================
+def international_daily_fetch():
+    """
+    Durante un torneo internazionale (Mondiali, Europei, Nations League) le
+    partite si giocano OGNI giorno della settimana, non solo nel weekend.
+    Questo job copre lunedì-giovedì: scarica fixtures + standings + injuries
+    + H2H + ML + report per le partite di OGGI di ciascun torneo
+    internazionale attivo. Il weekend (venerdì-lunedì) resta coperto da
+    friday_full_fetch + daily_refresh.
+
+    Se nessun torneo internazionale ha partite oggi, il job non fa nulla
+    (3 call/giorno al massimo, una per torneo, per verificare le fixtures).
+    """
+    logger.info("=== INTERNATIONAL DAILY FETCH START ===")
+    today_str = date.today().isoformat()
+    week_start = get_week_start()
+
+    all_fixtures: list[dict] = []
+    standings_cache: dict[int, dict] = {}
+    injuries_cache: dict[int, dict] = {}
+
+    for key in INTERNATIONAL_LEAGUE_KEYS:
+        league = LEAGUES[key]
+        season = get_season_for_competition(key)
+        fixtures = api.get_fixtures_by_league(
+            league_id=league["id"],
+            season=season,
+            from_date=today_str,
+            to_date=today_str,
+        )
+        if not fixtures:
+            logger.debug("Torneo %s: nessuna partita oggi, skip.", key)
+            continue
+
+        league_rows = [_build_fixture_row(f, league["id"], week_start) for f in fixtures]
+        for row in league_rows:
+            db.table("fixtures").upsert(row).execute()
+        all_fixtures.extend(league_rows)
+        logger.info("Torneo %s (season %s): %d partite oggi", key, season, len(fixtures))
+
+        standings_cache[league["id"]] = _build_standings_cache(league["id"], season)
+        injuries_cache[league["id"]] = _build_injuries_cache(league["id"], season)
+
+    if not all_fixtures:
+        logger.info("Nessuna partita nei tornei internazionali oggi.")
+        return
+
+    for f in all_fixtures:
+        _process_fixture(f, standings_cache, injuries_cache)
+
+    logger.info("=== INTERNATIONAL DAILY FETCH END — %d partite elaborate ===", len(all_fixtures))
 
 
 # ==============================================================
@@ -396,5 +468,10 @@ def setup_scheduler() -> BackgroundScheduler:
         lambda: daily_refresh("sunday"),
         CronTrigger(day_of_week="sun", hour=SUNDAY_FETCH_HOUR, minute=0),
         id="sunday_refresh", replace_existing=True,
+    )
+    scheduler.add_job(
+        international_daily_fetch,
+        CronTrigger(day_of_week="mon-thu", hour=FRIDAY_FETCH_HOUR, minute=0),
+        id="international_daily_fetch", replace_existing=True,
     )
     return scheduler
