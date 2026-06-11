@@ -193,7 +193,7 @@ def _process_fixture(f: dict, standings_cache: dict) -> None:
         "ml_away_prob":           probs["away_win"],
         "ml_expected_goals_home": probs["expected_home"],
         "ml_expected_goals_away": probs["expected_away"],
-    }).execute()
+    }, on_conflict="fixture_id").execute()
 
     prompt = build_match_prompt(
         home_team=f["home_team_name"],
@@ -216,7 +216,7 @@ def _process_fixture(f: dict, standings_cache: dict) -> None:
             "report_text":    text,
             "llm_model_used": model_used,
             "is_updated":     False,
-        }).execute()
+        }, on_conflict="fixture_id").execute()
         logger.info("Report generato per fixture %d [%s]", fixture_id, model_used)
     else:
         logger.error("Report fallito per fixture %d", fixture_id)
@@ -412,7 +412,7 @@ def daily_refresh(day_name: str = "saturday"):
             "ml_away_prob":           probs["away_win"],
             "ml_expected_goals_home": probs["expected_home"],
             "ml_expected_goals_away": probs["expected_away"],
-        }).execute()
+        }, on_conflict="fixture_id").execute()
 
         prompt = build_match_prompt(
             home_team=f["home_team_name"], away_team=f["away_team_name"],
@@ -432,7 +432,7 @@ def daily_refresh(day_name: str = "saturday"):
                 "report_text":    text,
                 "llm_model_used": model_used,
                 "is_updated":     True,
-            }).execute()
+            }, on_conflict="fixture_id").execute()
             logger.info("Report aggiornato fixture %d (classifica cambiata)", fid)
 
     logger.info("=== %s REFRESH END ===", day_name.upper())
