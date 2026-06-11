@@ -62,7 +62,9 @@ CLUB_LEAGUE_KEYS = [k for k, v in LEAGUES.items() if not v.get("international")]
 
 # --- OpenRouter ---
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-LLM_PRIMARY   = "qwen/qwen3-next-80b-a3b-instruct:free"
+# openrouter/free seleziona automaticamente un modello :free disponibile,
+# evitando i 429 upstream quando un singolo provider (es. Venice per Qwen) è congestionato.
+LLM_PRIMARY   = "openrouter/free"
 LLM_FALLBACK  = "qwen/qwen3-coder:free"
 LLM_MAX_TOKENS = 1200
 
