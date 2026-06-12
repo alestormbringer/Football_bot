@@ -1,0 +1,29 @@
+# Unit systemd per Football AI Bot.
+#
+# Installazione (vedi anche docs/SETUP_VPS.md):
+#   sudo cp deploy/football-bot.service /etc/systemd/system/
+#   sudo nano /etc/systemd/system/football-bot.service   # adatta User/percorsi
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now football-bot
+#
+# `Restart=always` + `RestartSec` fanno ripartire il bot automaticamente
+# dopo un crash o un reboot del VPS, senza bisogno di nohup/screen.
+
+[Unit]
+Description=Football AI Bot (Telegram + scheduler)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=football-bot
+WorkingDirectory=/home/football-bot/football-ai-bot
+EnvironmentFile=/home/football-bot/football-ai-bot/.env
+ExecStart=/home/football-bot/football-ai-bot/venv/bin/python3 main.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/football-bot/football-ai-bot/logs/bot.log
+StandardError=append:/home/football-bot/football-ai-bot/logs/bot.log
+
+[Install]
+WantedBy=multi-user.target

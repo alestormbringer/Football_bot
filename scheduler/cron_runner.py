@@ -1,5 +1,7 @@
 import logging
+import time
 from datetime import date, timedelta
+from apscheduler.events import EVENT_JOB_ERROR
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from config.settings import (
@@ -10,6 +12,8 @@ from config.database import get_client
 from modules.api_client import FootballDataClient
 from modules.predictor_ml import compute_poisson_probs
 from modules.report_generator import build_match_prompt, generate_report_with_fallback
+from modules.scraper import get_match_news_summary
+from bot.notifier import broadcast_report, notify_admin
 
 logger = logging.getLogger(__name__)
 api    = FootballDataClient()
@@ -195,6 +199,8 @@ def _process_fixture(f: dict, standings_cache: dict) -> None:
         "ml_expected_goals_away": probs["expected_away"],
     }, on_conflict="fixture_id").execute()
 
+    news_summary = get_match_news_summary(f["home_team_name"], f["away_team_name"])
+
     prompt = build_match_prompt(
         home_team=f["home_team_name"],
         away_team=f["away_team_name"],
@@ -208,6 +214,7 @@ def _process_fixture(f: dict, standings_cache: dict) -> None:
         h2h_summary=h2h_summary,
         injuries_home=[],
         injuries_away=[],
+        news_summary=news_summary,
     )
     text, model_used = generate_report_with_fallback(prompt)
     if text:
@@ -218,6 +225,7 @@ def _process_fixture(f: dict, standings_cache: dict) -> None:
             "is_updated":     False,
         }, on_conflict="fixture_id").execute()
         logger.info("Report generato per fixture %d [%s]", fixture_id, model_used)
+        broadcast_report(comp_id, fixture_id, text, is_updated=False)
     else:
         logger.error("Report fallito per fixture %d", fixture_id)
 
@@ -235,6 +243,7 @@ def friday_full_fetch():
     5. Genera report LLM per ogni partita
     """
     logger.info("=== FRIDAY FETCH START ===")
+    start = time.monotonic()
     from_date, to_date = get_weekend_range()
     week_start = get_week_start()
 
@@ -274,7 +283,8 @@ def friday_full_fetch():
     for f in all_fixtures:
         _process_fixture(f, standings_cache)
 
-    logger.info("=== FRIDAY FETCH END — %d partite elaborate ===", len(all_fixtures))
+    logger.info("=== FRIDAY FETCH END — %d partite elaborate (%.1fs) ===",
+                len(all_fixtures), time.monotonic() - start)
 
 
 # ==============================================================
@@ -292,6 +302,7 @@ def international_daily_fetch():
     (1 call per torneo per verificare le fixtures).
     """
     logger.info("=== INTERNATIONAL DAILY FETCH START ===")
+    start = time.monotonic()
     today_str = date.today().isoformat()
     week_start = get_week_start()
 
@@ -321,13 +332,14 @@ def international_daily_fetch():
         standings_cache[league["id"]] = _build_standings_cache(league["code"])
 
     if not all_fixtures:
-        logger.info("Nessuna partita nei tornei internazionali oggi.")
+        logger.info("Nessuna partita nei tornei internazionali oggi (%.1fs).", time.monotonic() - start)
         return
 
     for f in all_fixtures:
         _process_fixture(f, standings_cache)
 
-    logger.info("=== INTERNATIONAL DAILY FETCH END — %d partite elaborate ===", len(all_fixtures))
+    logger.info("=== INTERNATIONAL DAILY FETCH END — %d partite elaborate (%.1fs) ===",
+                len(all_fixtures), time.monotonic() - start)
 
 
 # ==============================================================
@@ -342,6 +354,7 @@ def daily_refresh(day_name: str = "saturday"):
     e rigenera il report.
     """
     logger.info("=== %s REFRESH START ===", day_name.upper())
+    start = time.monotonic()
     today = date.today().isoformat()
 
     result = db.table("fixtures") \
@@ -353,7 +366,7 @@ def daily_refresh(day_name: str = "saturday"):
 
     today_fixtures = result.data or []
     if not today_fixtures:
-        logger.info("Nessuna partita oggi, refresh saltato.")
+        logger.info("Nessuna partita oggi, refresh saltato (%.1fs).", time.monotonic() - start)
         return
 
     logger.info("Partite oggi: %d", len(today_fixtures))
@@ -414,6 +427,8 @@ def daily_refresh(day_name: str = "saturday"):
             "ml_expected_goals_away": probs["expected_away"],
         }, on_conflict="fixture_id").execute()
 
+        news_summary = get_match_news_summary(f["home_team_name"], f["away_team_name"])
+
         prompt = build_match_prompt(
             home_team=f["home_team_name"], away_team=f["away_team_name"],
             competition=_get_league_name(comp_id),
@@ -424,6 +439,7 @@ def daily_refresh(day_name: str = "saturday"):
             away_position=away_position or 0,
             ml_probs=probs, h2h_summary="aggiornamento del giorno",
             injuries_home=[], injuries_away=[],
+            news_summary=news_summary,
         )
         text, model_used = generate_report_with_fallback(prompt)
         if text:
@@ -434,8 +450,9 @@ def daily_refresh(day_name: str = "saturday"):
                 "is_updated":     True,
             }, on_conflict="fixture_id").execute()
             logger.info("Report aggiornato fixture %d (classifica cambiata)", fid)
+            broadcast_report(comp_id, fid, text, is_updated=True)
 
-    logger.info("=== %s REFRESH END ===", day_name.upper())
+    logger.info("=== %s REFRESH END (%.1fs) ===", day_name.upper(), time.monotonic() - start)
 
 
 # ==============================================================
@@ -469,8 +486,16 @@ def _get_league_name(league_id: int) -> str:
 # ==============================================================
 # Setup scheduler
 # ==============================================================
+def _on_job_error(event):
+    """Listener APScheduler: logga e notifica l'admin se un job pianificato
+    solleva un'eccezione non gestita (lo scheduler continua comunque)."""
+    logger.error("Job %s fallito: %s", event.job_id, event.exception)
+    notify_admin(f"❌ Job `{event.job_id}` fallito: {event.exception}")
+
+
 def setup_scheduler() -> BackgroundScheduler:
     scheduler = BackgroundScheduler(timezone="UTC")
+    scheduler.add_listener(_on_job_error, EVENT_JOB_ERROR)
     scheduler.add_job(
         friday_full_fetch,
         CronTrigger(day_of_week="fri", hour=FRIDAY_FETCH_HOUR, minute=0),

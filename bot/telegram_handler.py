@@ -8,7 +8,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ContextTypes
 )
 
-from config.settings import TELEGRAM_TOKEN, COMPETITION_DISPLAY_NAMES, LEAGUES
+from config.settings import TELEGRAM_TOKEN, COMPETITION_DISPLAY_NAMES, COMPETITION_GROUPS, LEAGUES
 from config.database import get_client
 
 logger = logging.getLogger(__name__)
@@ -103,7 +103,10 @@ async def callback_competition(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = query.from_user.id
     await query.answer()
 
-    data = query.data  # formato: "comp_toggle:serie_a" o "comp_save"
+    data = query.data  # formato: "comp_toggle:serie_a", "comp_save" o "noop"
+
+    if data == "noop":
+        return  # intestazione di sezione, non cliccabile
 
     if data.startswith("comp_toggle:"):
         key = data.split(":", 1)[1]
@@ -141,7 +144,8 @@ async def callback_competition(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 def _build_competition_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    """Costruisce la tastiera con stato attivo/inattivo per ogni competizione."""
+    """Costruisce la tastiera con stato attivo/inattivo per ogni competizione,
+    raggruppata per sezione (`COMPETITION_GROUPS`)."""
     prefs_res = db.table("user_preferences") \
         .select("competition_key") \
         .eq("telegram_id", user_id) \
@@ -149,12 +153,15 @@ def _build_competition_keyboard(user_id: int) -> InlineKeyboardMarkup:
     active = {p["competition_key"] for p in (prefs_res.data or [])}
 
     buttons = []
-    for key, label in COMPETITION_DISPLAY_NAMES.items():
-        tick = "✅" if key in active else "⬜"
-        buttons.append([InlineKeyboardButton(
-            f"{tick} {label}",
-            callback_data=f"comp_toggle:{key}"
-        )])
+    for group_name, keys in COMPETITION_GROUPS.items():
+        buttons.append([InlineKeyboardButton(f"— {group_name} —", callback_data="noop")])
+        for key in keys:
+            label = COMPETITION_DISPLAY_NAMES.get(key, key)
+            tick = "✅" if key in active else "⬜"
+            buttons.append([InlineKeyboardButton(
+                f"{tick} {label}",
+                callback_data=f"comp_toggle:{key}"
+            )])
     buttons.append([InlineKeyboardButton("💾 Salva", callback_data="comp_save")])
     return InlineKeyboardMarkup(buttons)
 

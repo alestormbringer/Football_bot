@@ -119,6 +119,16 @@ CREATE TABLE IF NOT EXISTS api_usage_log (
 );
 CREATE INDEX IF NOT EXISTS idx_api_log_date ON api_usage_log(log_date);
 
+-- 8. llm_usage_log — monitoring chiamate OpenRouter (piano Free: 50/giorno)
+CREATE TABLE IF NOT EXISTS llm_usage_log (
+    id          SERIAL PRIMARY KEY,
+    log_date    DATE NOT NULL DEFAULT CURRENT_DATE,
+    model       TEXT NOT NULL,
+    success     BOOLEAN NOT NULL,
+    logged_at   TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_llm_log_date ON llm_usage_log(log_date);
+
 -- ================================================================
 -- View utile: call API per giorno (monitoring)
 -- ================================================================
@@ -131,6 +141,20 @@ SELECT
 FROM api_usage_log
 WHERE log_date = CURRENT_DATE
 GROUP BY endpoint
+ORDER BY calls DESC;
+
+-- ================================================================
+-- View utile: chiamate OpenRouter per giorno (monitoring quota :free)
+-- ================================================================
+CREATE OR REPLACE VIEW llm_calls_today AS
+SELECT
+    model,
+    COUNT(*) AS calls,
+    COUNT(*) FILTER (WHERE success) AS successes,
+    COUNT(*) FILTER (WHERE NOT success) AS failures
+FROM llm_usage_log
+WHERE log_date = CURRENT_DATE
+GROUP BY model
 ORDER BY calls DESC;
 
 -- ================================================================

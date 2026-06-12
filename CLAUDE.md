@@ -33,23 +33,32 @@ config/
 modules/
 ├── api_client.py        # FootballDataClient — wrapper football-data.org con rate limit locale
 ├── predictor_ml.py       # modello Poisson + feature engineering (puro, testato)
-├── report_generator.py    # prompt building + chiamata OpenRouter (con retry su 429)
-└── scraper.py             # scraping RSS news calcio — NON ancora integrato nel flusso bot
+├── report_generator.py    # prompt building + chiamata OpenRouter (retry su 429, log uso LLM)
+└── scraper.py             # scraping RSS news calcio — integrato nel prompt (get_match_news_summary)
 
 bot/
-└── telegram_handler.py     # comandi Telegram: /start, /pronostici, /help
+├── telegram_handler.py     # comandi Telegram: /start, /pronostici, /help
+└── notifier.py              # invio automatico report agli iscritti + alert admin (job falliti, quota OpenRouter)
 
 scheduler/
 └── cron_runner.py           # job APScheduler (vedi sezione "Job pianificati")
 
 main.py                       # entry point — avvia scheduler + bot Telegram (polling)
 SUPABASE_SCHEMA.sql            # schema DB da eseguire su Supabase (idempotente)
+deploy/
+└── football-bot.service       # unit systemd (Restart=always) per il deploy in produzione
 docs/
 ├── BUILD_SPEC.md             # spec di build originale (ora con nota di migrazione in testa)
 ├── API_REFERENCE.md          # reference endpoint football-data.org v4 usati
-└── SETUP_VPS.md              # comandi di deploy/test sul VPS
+└── SETUP_VPS.md              # comandi di deploy/test sul VPS (incl. systemd)
 tests/
-└── test_predictor_ml.py      # unit test del modello ML (10 test, nessuna credenziale richiesta)
+├── conftest.py               # env fittizie per import moduli che istanziano client Supabase/Telegram
+├── test_predictor_ml.py      # unit test del modello ML (10 test)
+├── test_scraper.py            # RSS news + get_match_news_summary
+├── test_report_generator.py   # prompt, retry/fallback OpenRouter, log uso LLM, alert quota
+├── test_notifier.py           # broadcast report agli iscritti, alert admin
+├── test_cron_runner.py        # helper normalizzazione fixture/standings/H2H, _process_fixture
+└── test_telegram_handler.py   # tastiera onboarding raggruppata (COMPETITION_GROUPS)
 ```
 
 > I documenti originali di specifica caricati a inizio progetto (`BUILD_SPEC.md`,
@@ -87,6 +96,27 @@ Tutti gli orari sono **UTC**.
 | `saturday_refresh` / `sunday_refresh` (= `daily_refresh`) | Sabato/Domenica 08:00 | Riscarica le classifiche delle leghe con partite quel giorno; se forma/posizione di una squadra sono cambiate, ricalcola ML e rigenera il report con `is_updated=True` |
 | `international_daily_fetch`    | Lunedì-Giovedì 06:00 | Per i tornei internazionali attivi (`world_cup`, `euro`): fixtures di OGGI, classifiche, H2H, ML, report. Copre i giorni infrasettimanali dei Mondiali/Europei (il weekend è già coperto da `friday_full_fetch`) |
 
+Ogni job logga durata totale a fine esecuzione e registra un listener
+APScheduler (`_on_job_error`, `EVENT_JOB_ERROR`) che notifica l'admin via
+Telegram se un job solleva un'eccezione non gestita.
+
+### Invio automatico dei pronostici
+
+Ogni volta che `_process_fixture`/`daily_refresh` genera o aggiorna un
+report, `bot/notifier.py::broadcast_report` lo invia subito a tutti gli
+utenti che seguono quella competizione (`user_preferences`), con prefisso
+"🔄 Aggiornamento pronostico" per i report rigenerati nel weekend.
+`/pronostici` resta disponibile per consultare on-demand i report già
+generati (es. dopo un `/start` tardivo).
+
+### News RSS nel prompt
+
+`modules/scraper.py::get_match_news_summary(home_team, away_team)` recupera
+i titoli più recenti dai feed RSS per le due squadre e viene passato come
+`news_summary` a `build_match_prompt` (sezione "Notizie recenti" del prompt;
+"nessuna novità rilevante" se vuoto o in caso di errore di rete — non blocca
+mai la generazione del report).
+
 ## Modelli LLM (`config/settings.py`)
 
 ```python
@@ -104,6 +134,12 @@ almeno $10 di credito sull'account; con $10+ di credito sale a 1000/giorno.
 Se in produzione iniziano a comparire molti "Report fallito per fixture N" nel
 weekend (tante partite = tante chiamate), valutare di aggiungere credito.
 
+Ogni chiamata (primary o fallback, successo o fallimento) viene loggata in
+`llm_usage_log` (vista `llm_calls_today`). Al raggiungimento di
+`OPENROUTER_DAILY_WARN_LIMIT` (45, in `config/settings.py`) chiamate nello
+stesso giorno, `_warn_if_quota_near_limit` invia un avviso una tantum
+all'admin via `notify_admin`.
+
 ## Database (Supabase)
 
 Schema completo in `SUPABASE_SCHEMA.sql` (idempotente, usa `IF NOT EXISTS` /
@@ -115,6 +151,7 @@ Schema completo in `SUPABASE_SCHEMA.sql` (idempotente, usa `IF NOT EXISTS` /
 - `reports` — report LLM per fixture (`fixture_id` UNIQUE, **non** PK)
 - `users` / `user_preferences` — utenti Telegram e competizioni seguite
 - `api_usage_log` — log chiamate football-data.org (monitoring, nessun limite giornaliero applicato)
+- `llm_usage_log` — log chiamate OpenRouter (model, success), vista `llm_calls_today` per monitorare la quota giornaliera
 
 > ⚠️ **Importante per gli upsert**: `fixture_stats` e `reports` hanno `id`
 > SERIAL come PK ma il vincolo di unicità reale è su `fixture_id`. Gli upsert
@@ -131,6 +168,7 @@ SUPABASE_URL            # https://xxxxx.supabase.co
 SUPABASE_KEY            # service/secret key (formato sb_secret_...)
 OPENROUTER_API_KEY      # https://openrouter.ai/keys
 TELEGRAM_BOT_TOKEN      # da @BotFather
+ADMIN_TELEGRAM_ID       # opzionale — ID Telegram admin per alert job falliti / quota OpenRouter
 ```
 
 `API_FOOTBALL_KEY` (vecchia integrazione) **non è più usata** — può essere
@@ -157,6 +195,17 @@ rimossa da `.env`.
 5. **`LLM_PRIMARY` → `openrouter/free`** (commit `1474e2f`): router automatico
    tra modelli `:free` disponibili, per evitare congestione su un singolo
    provider.
+6. **Invio automatico, news RSS, monitoring e alerting** (sessione
+   2026-06-12): `bot/notifier.py` invia subito ogni report agli iscritti
+   (`broadcast_report`) invece di affidarsi solo a `/pronostici`;
+   `modules/scraper.py` ora è collegato al prompt via
+   `get_match_news_summary`; tastiera onboarding raggruppata per
+   `COMPETITION_GROUPS`; nuova tabella `llm_usage_log` + avviso admin a 45
+   chiamate OpenRouter/giorno; listener APScheduler che notifica l'admin sui
+   job falliti; nuovo unit systemd (`deploy/football-bot.service`,
+   `Restart=always`) consigliato al posto di `nohup`; aggiunta suite di test
+   per `scraper`, `report_generator`, `notifier`, `cron_runner` e
+   `telegram_handler` (52 test totali).
 
 **Stato verificato (2026-06-11, giorno di inizio Mondiale 2026)**:
 end-to-end testato con successo sul VPS — `international_daily_fetch()` ha
@@ -174,7 +223,9 @@ pip install -r requirements-dev.txt   # requirements.txt + pytest
 
 cp .env.example .env   # compilare con credenziali reali, MAI committare .env
 
-pytest   # 10 test su modules/predictor_ml.py, non richiedono credenziali
+pytest   # 52 test (predictor_ml, scraper, report_generator, notifier,
+         # cron_runner, telegram_handler). tests/conftest.py imposta env
+         # fittizie: non servono credenziali reali né accesso di rete.
 ```
 
 ## Branch e workflow git
@@ -187,16 +238,18 @@ pytest   # 10 test su modules/predictor_ml.py, non richiedono credenziali
 
 ## Deploy VPS
 
-Vedi [`docs/SETUP_VPS.md`](docs/SETUP_VPS.md) per i comandi completi
-(setup ambiente, test connessioni, avvio con `nohup`, monitoraggio log e
-report su Supabase).
+Vedi [`docs/SETUP_VPS.md`](docs/SETUP_VPS.md) per i comandi completi (setup
+ambiente, test connessioni, deploy come servizio **systemd**
+(`deploy/football-bot.service`, `Restart=always` — riavvio automatico dopo
+crash/reboot), monitoraggio log e report su Supabase).
 
 ## Da fare / possibili prossimi passi
 
-- Monitorare il consumo giornaliero OpenRouter durante il weekend
-  (`friday_full_fetch` genera un report per ogni partita delle 8 competizioni)
-  — valutare credito $10 se si superano i 50 req/giorno.
-- `modules/scraper.py` (RSS news calcio) non è collegato al flusso principale:
-  valutare se integrarlo nei report o rimuoverlo.
-- Considerare systemd unit al posto di `nohup` per riavvio automatico del bot
-  dopo reboot/crash del VPS.
+- Verificare in produzione che l'invio automatico dei report
+  (`broadcast_report`) non saturi i limiti dell'API Telegram con molti
+  iscritti contemporanei (attualmente 0.05s di pausa tra un invio e l'altro).
+- Se si configura `ADMIN_TELEGRAM_ID`, verificare che l'admin riceva
+  correttamente gli alert (job falliti, quota OpenRouter) dopo il primo
+  deploy.
+- Valutare se aggiungere un comando `/stop` (rimozione rapida di tutte le
+  preferenze) ora che i pronostici arrivano in automatico.

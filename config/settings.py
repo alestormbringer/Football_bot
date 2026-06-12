@@ -10,6 +10,11 @@ SUPABASE_KEY          = os.getenv("SUPABASE_KEY")
 OPENROUTER_KEY        = os.getenv("OPENROUTER_API_KEY")
 TELEGRAM_TOKEN        = os.getenv("TELEGRAM_BOT_TOKEN")
 
+# ID Telegram dell'amministratore (opzionale): se impostato, riceve notifiche
+# di errore dai job pianificati e avvisi sul consumo OpenRouter.
+_admin_id = os.getenv("ADMIN_TELEGRAM_ID")
+ADMIN_TELEGRAM_ID = int(_admin_id) if _admin_id else None
+
 # --- football-data.org ---
 FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
 FOOTBALL_DATA_HEADERS  = {
@@ -67,6 +72,11 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 LLM_PRIMARY   = "openrouter/free"
 LLM_FALLBACK  = "qwen/qwen3-coder:free"
 LLM_MAX_TOKENS = 1200
+
+# Limite piano Free OpenRouter: 50 richieste/giorno su modelli :free senza
+# credito. Sopra questa soglia viene inviato un avviso all'admin (vedi
+# modules/report_generator.py::_warn_if_quota_near_limit).
+OPENROUTER_DAILY_WARN_LIMIT = 45
 
 # --- Scheduler (orari UTC, VPS in Europa) ---
 FRIDAY_FETCH_HOUR   = 6   # 06:00 UTC = 08:00 ora italiana

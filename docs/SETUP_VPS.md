@@ -69,10 +69,37 @@ friday_full_fetch()
 "
 ```
 
-## Avvio in produzione
+## Avvio in produzione (consigliato: systemd)
+
+`Restart=always` fa ripartire automaticamente il bot dopo un crash, un
+errore non gestito o un reboot del VPS — niente `nohup`/`screen` da
+tenere d'occhio manualmente.
 
 ```bash
-# Con nohup (sopravvive alla disconnessione SSH)
+# Adatta User= e i percorsi se necessario, poi installa l'unit
+sudo cp deploy/football-bot.service /etc/systemd/system/
+sudo nano /etc/systemd/system/football-bot.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now football-bot
+
+# Verifica stato e log
+sudo systemctl status football-bot
+journalctl -u football-bot -f
+# oppure, dato che lo unit scrive anche su file:
+tail -f ~/football-ai-bot/logs/bot.log
+
+# Riavvio manuale dopo un deploy/aggiornamento codice
+sudo systemctl restart football-bot
+
+# Fermare il bot
+sudo systemctl stop football-bot
+```
+
+## Avvio alternativo (nohup, solo per test rapidi)
+
+```bash
+# Con nohup (sopravvive alla disconnessione SSH, ma NON riparte da sola dopo un crash)
 nohup python3 main.py > logs/bot.log 2>&1 &
 echo $! > logs/bot.pid
 
@@ -92,12 +119,22 @@ tail -f ~/football-ai-bot/logs/bot.log
 # Controlla chiamate API loggate da Supabase (SQL editor)
 SELECT * FROM api_calls_today;
 
+# Controlla consumo OpenRouter (limite Free: 50/giorno senza credito)
+SELECT * FROM llm_calls_today;
+
 # Controlla report della settimana
 SELECT competition, home_team_name, away_team_name, match_date,
        is_updated, llm_model_used
 FROM weekly_reports
 ORDER BY match_date;
 ```
+
+Se `ADMIN_TELEGRAM_ID` è configurato in `.env`, l'amministratore riceve un
+messaggio Telegram automatico quando:
+- un job pianificato (`friday_full_fetch`, `daily_refresh`,
+  `international_daily_fetch`) solleva un'eccezione non gestita;
+- si raggiungono 45 chiamate OpenRouter nella giornata (soglia di avviso
+  prima del limite di 50/giorno del piano Free).
 
 Il piano Free di football-data.org non ha un tetto giornaliero, solo il
 limite di 10 richieste/minuto gestito automaticamente dal client — non serve
