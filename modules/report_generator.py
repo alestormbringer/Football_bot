@@ -1,7 +1,13 @@
 import time
 import logging
+from datetime import date
 import requests
-from config.settings import OPENROUTER_BASE_URL, OPENROUTER_KEY, LLM_PRIMARY, LLM_FALLBACK, LLM_MAX_TOKENS
+from config.settings import (
+    OPENROUTER_BASE_URL, OPENROUTER_KEY, LLM_PRIMARY, LLM_FALLBACK, LLM_MAX_TOKENS,
+    OPENROUTER_DAILY_WARN_LIMIT,
+)
+from config.database import get_client
+from bot.notifier import notify_admin
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +31,7 @@ def build_match_prompt(
     h2h_summary: str,
     injuries_home: list,
     injuries_away: list,
+    news_summary: str = "",
 ) -> str:
     """
     Costruisce il prompt per la generazione del report.
@@ -39,6 +46,8 @@ def build_match_prompt(
     injuries_away_text = ", ".join(
         f"{p['name']} ({p['reason']})" for p in injuries_away[:3]
     ) if injuries_away else "nessun infortunio noto"
+
+    news_text = news_summary or "nessuna novità rilevante"
 
     prompt = f"""Genera un report di pronostico per questa partita:
 
@@ -55,6 +64,7 @@ def build_match_prompt(
 - H2H (ultimi 5): {h2h_summary}
 - Infortuni {home_team}: {injuries_home_text}
 - Infortuni {away_team}: {injuries_away_text}
+- Notizie recenti: {news_text}
 
 **Struttura richiesta (rispetta questa struttura esatta):**
 
@@ -92,6 +102,40 @@ def _retry_after_seconds(resp: requests.Response, default: float = 5.0) -> float
     except Exception:
         pass
     return default
+
+
+def _log_llm_call(model: str, success: bool) -> None:
+    """Logga su Supabase ogni chiamata LLM (monitoring consumo OpenRouter)."""
+    try:
+        get_client().table("llm_usage_log").insert({
+            "log_date": date.today().isoformat(),
+            "model": model,
+            "success": success,
+        }).execute()
+    except Exception as e:
+        logger.warning("Log chiamata LLM fallito: %s", e)
+
+
+def _warn_if_quota_near_limit() -> None:
+    """Avvisa l'admin (una volta al giorno) se ci si avvicina al limite
+    di 50 richieste/giorno del piano Free OpenRouter."""
+    try:
+        today = date.today().isoformat()
+        res = get_client().table("llm_usage_log") \
+            .select("id", count="exact") \
+            .eq("log_date", today) \
+            .execute()
+        count = res.count or 0
+    except Exception as e:
+        logger.warning("Controllo quota OpenRouter fallito: %s", e)
+        return
+
+    if count == OPENROUTER_DAILY_WARN_LIMIT:
+        notify_admin(
+            f"⚠️ OpenRouter: raggiunte {count} chiamate oggi "
+            f"(soglia di avviso {OPENROUTER_DAILY_WARN_LIMIT}/giorno sul piano Free). "
+            "Valutare l'aggiunta di credito se i report iniziano a fallire."
+        )
 
 
 def generate_report(prompt: str, model: str = LLM_PRIMARY, retries: int = 2) -> str | None:
@@ -153,11 +197,17 @@ def generate_report_with_fallback(prompt: str) -> tuple[str | None, str]:
     """
     text = generate_report(prompt, LLM_PRIMARY)
     if text:
+        _log_llm_call(LLM_PRIMARY, success=True)
+        _warn_if_quota_near_limit()
         return text, LLM_PRIMARY
 
+    _log_llm_call(LLM_PRIMARY, success=False)
     logger.warning("Primary LLM fallito, provo fallback %s", LLM_FALLBACK)
     text = generate_report(prompt, LLM_FALLBACK)
     if text:
+        _log_llm_call(LLM_FALLBACK, success=True)
+        _warn_if_quota_near_limit()
         return text, LLM_FALLBACK
 
+    _log_llm_call(LLM_FALLBACK, success=False)
     return None, "none"

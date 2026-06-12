@@ -60,3 +60,21 @@ def search_team_news(team_name: str, feed_urls: list[str] | None = None, max_ite
         if needle in n["title"].lower() or needle in n.get("summary", "").lower()
     ]
     return matches[:max_items]
+
+
+def get_match_news_summary(home_team: str, away_team: str, max_items_per_team: int = 2) -> str:
+    """
+    Riassunto testuale (titoli separati da " | ") delle news più recenti
+    relative alle due squadre, da passare come contesto opzionale al
+    prompt del report. Restituisce stringa vuota se non trova nulla o in
+    caso di errore di rete (nessun impatto sul flusso principale).
+    """
+    try:
+        home_news = search_team_news(home_team, max_items=max_items_per_team)
+        away_news = search_team_news(away_team, max_items=max_items_per_team)
+    except Exception as e:
+        logger.warning("Errore recupero news per %s/%s: %s", home_team, away_team, e)
+        return ""
+
+    titles = [n["title"] for n in (home_news + away_news) if n.get("title")]
+    return " | ".join(titles)
